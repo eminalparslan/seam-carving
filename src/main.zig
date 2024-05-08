@@ -1,24 +1,67 @@
 const std = @import("std");
+const c = @cImport({
+    @cInclude("stb_image.h");
+    @cInclude("glad/gl.h");
+    @cInclude("GLFW/glfw3.h");
+});
 
-pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // don't forget to flush!
+fn glErrorCallback(err: c_int, desc: [*c]const u8) callconv(.C) void {
+    std.log.err("GLFW error {d}: {s}\n", .{ err, desc });
 }
 
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+pub fn main() !void {
+    var width: c_int = undefined;
+    var height: c_int = undefined;
+    var channels: c_int = undefined;
+    const image: [*c]u8 = c.stbi_load("Broadway_tower_edit.jpg", &width, &height, &channels, 0);
+    if (image == null) {
+        std.log.err("Failed to load image!\n", .{});
+        return;
+    }
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+    _ = alloc;
+
+    if (c.glfwInit() == c.GLFW_FALSE) {
+        std.log.err("Failed to initialize GLFW!\n", .{});
+        return error.Initialization;
+    }
+    defer c.glfwTerminate();
+
+    _ = c.glfwSetErrorCallback(glErrorCallback);
+
+    c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MAJOR, 4);
+    c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MINOR, 1);
+
+    const window = c.glfwCreateWindow(640, 480, "Title", null, null) orelse {
+        std.log.err("Failed to create window!\n", .{});
+        return error.Initialization;
+    };
+    defer c.glfwDestroyWindow(window);
+
+    c.glfwMakeContextCurrent(window);
+    if (c.gladLoadGL(c.glfwGetProcAddress) == 0) {
+        std.log.err("Failed to load OpenGL!\n", .{});
+        return error.Initialization;
+    }
+
+    // vsync
+    c.glfwSwapInterval(1);
+    // debug output
+    c.glEnable(c.GL_DEBUG_OUTPUT);
+    // not available in OpenGL 4.1, which is the highest version on MacOS
+    // c.glDebugMessageCallback(glDebugCallback, null);
+
+    // TODO: glfwSetWindowShouldClose on escape key
+    while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
+        c.glClearColor(0.2, 0.3, 0.3, 1.0);
+        c.glClear(c.GL_COLOR_BUFFER_BIT);
+
+        c.glfwSwapBuffers(window);
+        c.glfwPollEvents();
+    }
+
+    std.debug.print("Image: width={}, height={}!\n", .{ width, height });
 }

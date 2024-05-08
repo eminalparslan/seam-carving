@@ -22,6 +22,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    exe.addIncludePath(b.path("src"));
+    exe.addCSourceFile(.{ .file = b.path("src/stb_image.c") });
+
+    exe.addIncludePath(b.path("glad/include"));
+    exe.addCSourceFile(.{ .file = b.path("glad/src/gl.c") });
+
+    exe.linkSystemLibrary("glfw");
+    // exe.linkSystemLibrary("GL");
+    exe.linkFramework("OpenGL");
+
+    exe.linkLibC();
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
