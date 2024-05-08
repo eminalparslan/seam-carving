@@ -90,8 +90,9 @@ pub fn main() !void {
 
     _ = c.glfwSetErrorCallback(glErrorCallback);
 
-    c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MAJOR, 4);
+    c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MAJOR, 2);
     c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MINOR, 1);
+    c.glfwWindowHint(c.GLFW_SAMPLES, 16);
 
     const window = c.glfwCreateWindow(640, 480, "Title", null, null) orelse {
         std.log.err("Failed to create window!\n", .{});
@@ -114,24 +115,6 @@ pub fn main() !void {
     // not available in OpenGL 4.1, which is the highest version on MacOS
     // c.glDebugMessageCallback(glDebugCallback, null);
 
-    const vertShaderSource: [*c]const u8 = @embedFile("vert.glsl");
-    const vertShader = c.glCreateShader(c.GL_VERTEX_SHADER);
-    defer c.glDeleteShader(vertShader);
-    c.glShaderSource(vertShader, 1, &vertShaderSource, null);
-    c.glCompileShader(vertShader);
-
-    const fragShaderSource: [*c]const u8 = @embedFile("frag.glsl");
-    const fragShader = c.glCreateShader(c.GL_FRAGMENT_SHADER);
-    defer c.glDeleteShader(fragShader);
-    c.glShaderSource(fragShader, 1, &fragShaderSource, null);
-    c.glCompileShader(fragShader);
-
-    const shaderProgram = c.glCreateProgram();
-    defer c.glDeleteProgram(shaderProgram);
-    c.glAttachShader(shaderProgram, vertShader);
-    c.glAttachShader(shaderProgram, fragShader);
-    c.glLinkProgram(shaderProgram);
-
     // c.glClearColor(0.2, 0.3, 0.3, 1.0);
     c.glClearColor(0.0, 0.0, 0.0, 1.0);
 
@@ -142,17 +125,35 @@ pub fn main() !void {
         // framebuffer size
         var fb_width: c_int = undefined;
         var fb_height: c_int = undefined;
+        const fb_width_f: f32 = @floatFromInt(fb_width);
+        const fb_height_f: f32 = @floatFromInt(fb_height);
         c.glfwGetFramebufferSize(window, &fb_width, &fb_height);
         c.glViewport(0, 0, fb_width, fb_height);
 
         c.glClear(c.GL_COLOR_BUFFER_BIT);
 
-        c.glUseProgram(shaderProgram);
+        c.glEnable(c.GL_TEXTURE_2D);
 
-        c.glActiveTexture(c.GL_TEXTURE0);
+        // c.glActiveTexture(c.GL_TEXTURE0);
         c.glBindTexture(c.GL_TEXTURE_2D, texture);
 
-        c.glDrawArrays(c.GL_TRIANGLES, 0, 4);
+        c.glMatrixMode(c.GL_PROJECTION);
+        c.glLoadIdentity();
+        c.glOrtho(0, fb_width_f, fb_height_f, 0, -1, 1);
+
+        c.glMatrixMode(c.GL_MODELVIEW);
+        c.glLoadIdentity();
+
+        c.glBegin(c.GL_QUADS);
+        c.glTexCoord2f(0.0, 0.0);
+        c.glVertex2f(0.0, 0.0);
+        c.glTexCoord2f(1.0, 0.0);
+        c.glVertex2f(fb_width_f, 0.0);
+        c.glTexCoord2f(1.0, 1.0);
+        c.glVertex2f(fb_width_f, fb_height_f);
+        c.glTexCoord2f(0.0, 1.0);
+        c.glVertex2f(0.0, fb_height_f);
+        c.glEnd();
 
         c.glfwSwapBuffers(window);
         c.glfwPollEvents();
