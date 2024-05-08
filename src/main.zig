@@ -5,10 +5,6 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
-// framebuffer size
-var fb_width: c_int = undefined;
-var fb_height: c_int = undefined;
-
 fn glErrorCallback(err: c_int, desc: [*c]const u8) callconv(.C) void {
     std.log.err("GLFW error {d}: {s}\n", .{ err, desc });
 }
@@ -21,22 +17,65 @@ fn keyCallback(window: ?*c.GLFWwindow, key: c_int, scancode: c_int, action: c_in
     }
 }
 
-fn framebufferSizeCallback(window: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
-    _ = window;
-    fb_width = width;
-    fb_height = height;
-    c.glViewport(0, 0, width, height);
+const Image = struct {
+    width: usize,
+    height: usize,
+    channels: usize,
+    size: usize,
+    data: []u8,
+
+    fn init(path: [*c]const u8) !Image {
+        var width: c_int = undefined;
+        var height: c_int = undefined;
+        var channels: c_int = undefined;
+        const data = c.stbi_load(path, &width, &height, &channels, 0);
+        if (data == null) {
+            return error.InvalidInput;
+        }
+
+        const size: usize = @intCast(width * height * channels);
+
+        return Image{
+            .width = @intCast(width),
+            .height = @intCast(height),
+            .channels = @intCast(channels),
+            .size = size,
+            .data = data[0..size],
+        };
+    }
+
+    fn deinit(self: *const Image) void {
+        c.stbi_image_free(@ptrCast(self.data.ptr));
+    }
+};
+
+fn imageToTexture(image: Image) !c.GLuint {
+    var texture: c.GLuint = undefined;
+    c.glGenTextures(1, &texture);
+    c.glBindTexture(c.GL_TEXTURE_2D, texture);
+
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_REPEAT);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_REPEAT);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+
+    if (image.channels == 3) {
+        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGB, @intCast(image.width), @intCast(image.height), 0, c.GL_RGB, c.GL_UNSIGNED_BYTE, image.data.ptr);
+    } else if (image.channels == 4) {
+        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA, @intCast(image.width), @intCast(image.height), 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, image.data.ptr);
+    } else {
+        std.log.err("Unsupported number of channels: {d}\n", .{image.channels});
+        return error.InvalidInput;
+    }
+
+    c.glGenerateMipmap(c.GL_TEXTURE_2D);
+
+    return texture;
 }
 
 pub fn main() !void {
-    var width: c_int = undefined;
-    var height: c_int = undefined;
-    var channels: c_int = undefined;
-    const image: [*c]u8 = c.stbi_load("Broadway_tower_edit.jpg", &width, &height, &channels, 0);
-    if (image == null) {
-        std.log.err("Failed to load image!\n", .{});
-        return;
-    }
+    const image: Image = try Image.init("Broadway_tower_edit.jpg");
+    defer image.deinit();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -68,8 +107,6 @@ pub fn main() !void {
 
     _ = c.glfwSetKeyCallback(window, keyCallback);
 
-    _ = c.glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
-
     // vsync
     c.glfwSwapInterval(1);
     // debug output
@@ -77,14 +114,49 @@ pub fn main() !void {
     // not available in OpenGL 4.1, which is the highest version on MacOS
     // c.glDebugMessageCallback(glDebugCallback, null);
 
-    // TODO: glfwSetWindowShouldClose on escape key
+    const vertShaderSource: [*c]const u8 = @embedFile("vert.glsl");
+    const vertShader = c.glCreateShader(c.GL_VERTEX_SHADER);
+    defer c.glDeleteShader(vertShader);
+    c.glShaderSource(vertShader, 1, &vertShaderSource, null);
+    c.glCompileShader(vertShader);
+
+    const fragShaderSource: [*c]const u8 = @embedFile("frag.glsl");
+    const fragShader = c.glCreateShader(c.GL_FRAGMENT_SHADER);
+    defer c.glDeleteShader(fragShader);
+    c.glShaderSource(fragShader, 1, &fragShaderSource, null);
+    c.glCompileShader(fragShader);
+
+    const shaderProgram = c.glCreateProgram();
+    defer c.glDeleteProgram(shaderProgram);
+    c.glAttachShader(shaderProgram, vertShader);
+    c.glAttachShader(shaderProgram, fragShader);
+    c.glLinkProgram(shaderProgram);
+
+    // c.glClearColor(0.2, 0.3, 0.3, 1.0);
+    c.glClearColor(0.0, 0.0, 0.0, 1.0);
+
+    const texture = try imageToTexture(image);
+    defer c.glDeleteTextures(1, &texture);
+
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
-        c.glClearColor(0.2, 0.3, 0.3, 1.0);
+        // framebuffer size
+        var fb_width: c_int = undefined;
+        var fb_height: c_int = undefined;
+        c.glfwGetFramebufferSize(window, &fb_width, &fb_height);
+        c.glViewport(0, 0, fb_width, fb_height);
+
         c.glClear(c.GL_COLOR_BUFFER_BIT);
+
+        c.glUseProgram(shaderProgram);
+
+        c.glActiveTexture(c.GL_TEXTURE0);
+        c.glBindTexture(c.GL_TEXTURE_2D, texture);
+
+        c.glDrawArrays(c.GL_TRIANGLES, 0, 4);
 
         c.glfwSwapBuffers(window);
         c.glfwPollEvents();
     }
 
-    std.debug.print("Image: width={}, height={}!\n", .{ width, height });
+    std.debug.print("Goodbye, world!\n", .{});
 }
