@@ -5,8 +5,27 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
+// framebuffer size
+var fb_width: c_int = undefined;
+var fb_height: c_int = undefined;
+
 fn glErrorCallback(err: c_int, desc: [*c]const u8) callconv(.C) void {
     std.log.err("GLFW error {d}: {s}\n", .{ err, desc });
+}
+
+fn keyCallback(window: ?*c.GLFWwindow, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.C) void {
+    _ = scancode;
+    _ = mods;
+    if (key == c.GLFW_KEY_ESCAPE and action == c.GLFW_PRESS) {
+        c.glfwSetWindowShouldClose(window, c.GLFW_TRUE);
+    }
+}
+
+fn framebufferSizeCallback(window: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
+    _ = window;
+    fb_width = width;
+    fb_height = height;
+    c.glViewport(0, 0, width, height);
 }
 
 pub fn main() !void {
@@ -46,6 +65,10 @@ pub fn main() !void {
         std.log.err("Failed to load OpenGL!\n", .{});
         return error.Initialization;
     }
+
+    _ = c.glfwSetKeyCallback(window, keyCallback);
+
+    _ = c.glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
 
     // vsync
     c.glfwSwapInterval(1);
