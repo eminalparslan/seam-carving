@@ -29,7 +29,6 @@ pub fn build(b: *std.Build) void {
     exe.addCSourceFile(.{ .file = b.path("glad/src/gl.c") });
 
     exe.linkSystemLibrary("glfw");
-    // exe.linkSystemLibrary("GL");
     exe.linkFramework("OpenGL");
 
     exe.linkLibC();

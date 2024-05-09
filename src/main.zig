@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = @import("std").debug.assert;
 const c = @cImport({
     @cInclude("stb_image.h");
     @cInclude("glad/gl.h");
@@ -24,28 +25,179 @@ const Image = struct {
     size: usize,
     data: []u8,
 
-    fn init(path: [*c]const u8) !Image {
+    fn imageFromFile(alloc: anytype, path: [*c]const u8) !Image {
         var width: c_int = undefined;
         var height: c_int = undefined;
         var channels: c_int = undefined;
-        const data = c.stbi_load(path, &width, &height, &channels, 0);
-        if (data == null) {
+        const imageDataPtr = c.stbi_load(path, &width, &height, &channels, 0);
+        if (imageDataPtr == null) {
             return error.InvalidInput;
         }
 
         const size: usize = @intCast(width * height * channels);
+
+        const imageData = try alloc.alloc(u8, size);
+        @memcpy(imageData, imageDataPtr[0..size]);
+
+        c.stbi_image_free(imageDataPtr);
 
         return Image{
             .width = @intCast(width),
             .height = @intCast(height),
             .channels = @intCast(channels),
             .size = size,
-            .data = data[0..size],
+            .data = imageData[0..size],
         };
     }
 
-    fn deinit(self: *const Image) void {
-        c.stbi_image_free(@ptrCast(self.data.ptr));
+    fn applyGrayscale(self: *const Image, alloc: anytype) !Image {
+        assert(self.channels == 3);
+
+        const grayscaleImageData = try alloc.alloc(u8, self.size / self.channels);
+
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
+                const offset = (x + self.width * y) * self.channels;
+                const r: f32 = @floatFromInt(self.data[offset + 0]);
+                const g: f32 = @floatFromInt(self.data[offset + 1]);
+                const b: f32 = @floatFromInt(self.data[offset + 2]);
+                const grayscale = 0.299 * r + 0.587 * g + 0.114 * b;
+                grayscaleImageData[x + self.width * y] = @intFromFloat(grayscale);
+            }
+        }
+
+        return Image{
+            .width = self.width,
+            .height = self.height,
+            .channels = 1,
+            .size = self.size / self.channels,
+            .data = grayscaleImageData,
+        };
+    }
+
+    fn applySobelOperator(self: *const Image, alloc: anytype) !Image {
+        assert(self.channels == 1);
+
+        const sobelImageData = try alloc.alloc(u8, self.size);
+
+        var gx: i32 = 0;
+        var gy: i32 = 0;
+        const positions = [_]@Vector(2, i32){ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 0, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
+        const x_kernel = [_]i32{ 1, 0, -1, 2, 0, -2, 1, 0, -1 };
+        const y_kernel = [_]i32{ 1, 2, 1, 0, 0, 0, -1, -2, -1 };
+
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
+                const offset = x + self.width * y;
+                if (x == 0 or x == self.width - 1 or y == 0 or y == self.height - 1) {
+                    sobelImageData[offset] = 0;
+                    continue;
+                }
+                gx = 0;
+                gy = 0;
+                const x_i32: i32 = @intCast(x);
+                const y_i32: i32 = @intCast(y);
+                inline for (positions, x_kernel, y_kernel) |pos, x_k, y_k| {
+                    const cx: usize = @intCast(x_i32 + pos[0]);
+                    const cy: usize = @intCast(y_i32 + pos[1]);
+                    gx += self.data[cx + self.width * cy] * x_k;
+                    gy += self.data[cx + self.width * cy] * y_k;
+                }
+                const g_: f32 = @floatFromInt(gx * gx + gy * gy);
+                const g: u32 = @intFromFloat(@sqrt(g_));
+                // FIXME
+                if (g > 255) {
+                    sobelImageData[offset] = 255;
+                } else {
+                    sobelImageData[offset] = @intCast(g);
+                }
+            }
+        }
+
+        return Image{
+            .width = self.width,
+            .height = self.height,
+            .channels = self.channels,
+            .size = self.size,
+            .data = sobelImageData,
+        };
+    }
+
+    fn applySeamCarve(self: *const Image, alloc: anytype, imageEnergy: *const Image) !Image {
+        assert(self.channels == 3);
+        assert(imageEnergy.channels == 1);
+
+        const carvedImageData = try alloc.alloc(u8, self.size);
+        @memcpy(carvedImageData, self.data);
+
+        const seamImageData = try alloc.alloc(u8, imageEnergy.size);
+        defer alloc.free(seamImageData);
+
+        for (0..imageEnergy.height) |y| {
+            for (0..imageEnergy.width) |x| {
+                const offset = x + imageEnergy.width * y;
+                if (y == 0) {
+                    seamImageData[offset] = imageEnergy.data[offset];
+                    continue;
+                }
+                var minEnergy = imageEnergy.data[x + imageEnergy.width * (y - 1)];
+                if (x != 0) minEnergy = @min(minEnergy, imageEnergy.data[(x - 1) + imageEnergy.width * (y - 1)]);
+                if (x != imageEnergy.width - 1) minEnergy = @min(minEnergy, imageEnergy.data[(x + 1) + imageEnergy.width * (y - 1)]);
+                seamImageData[offset] = imageEnergy.data[offset] +| minEnergy;
+            }
+        }
+
+        var minX: usize = 0;
+        var minEnergy = seamImageData[minX + imageEnergy.width * (imageEnergy.height - 1)];
+        for (1..imageEnergy.width) |x| {
+            const energy = seamImageData[x + imageEnergy.width * (imageEnergy.height - 1)];
+            if (energy < minEnergy) {
+                minEnergy = energy;
+                minX = x;
+            }
+        }
+
+        const lastRowOffset = (minX + imageEnergy.width * (self.height - 1)) * self.channels;
+        carvedImageData[lastRowOffset + 0] = 0xFF;
+        carvedImageData[lastRowOffset + 1] = 0x00;
+        carvedImageData[lastRowOffset + 2] = 0x00;
+
+        var y: usize = imageEnergy.height - 2;
+        while (y > 0) : (y -= 1) {
+            const prevMinX = minX;
+            minEnergy = seamImageData[prevMinX + imageEnergy.width * y];
+            if (prevMinX != 0) {
+                const energy = seamImageData[(prevMinX - 1) + imageEnergy.width * y];
+                if (energy < minEnergy) {
+                    minEnergy = energy;
+                    minX = prevMinX - 1;
+                }
+            }
+            if (prevMinX != imageEnergy.width - 1) {
+                const energy = seamImageData[(prevMinX + 1) + imageEnergy.width * y];
+                if (energy < minEnergy) {
+                    minEnergy = energy;
+                    minX = prevMinX + 1;
+                }
+            }
+
+            const offset = (minX + imageEnergy.width * y) * self.channels;
+            carvedImageData[offset + 0] = 0xFF;
+            carvedImageData[offset + 1] = 0x00;
+            carvedImageData[offset + 2] = 0x00;
+        }
+
+        return Image{
+            .width = self.width,
+            .height = self.height,
+            .channels = self.channels,
+            .size = self.size,
+            .data = carvedImageData,
+        };
+    }
+
+    fn deinit(self: *const Image, alloc: anytype) void {
+        alloc.free(self.data);
     }
 };
 
@@ -59,13 +211,14 @@ fn imageToTexture(image: Image) !c.GLuint {
     c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
     c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
 
-    if (image.channels == 3) {
-        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGB, @intCast(image.width), @intCast(image.height), 0, c.GL_RGB, c.GL_UNSIGNED_BYTE, image.data.ptr);
-    } else if (image.channels == 4) {
-        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA, @intCast(image.width), @intCast(image.height), 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, image.data.ptr);
-    } else {
-        std.log.err("Unsupported number of channels: {d}\n", .{image.channels});
-        return error.InvalidInput;
+    switch (image.channels) {
+        1 => c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_LUMINANCE, @intCast(image.width), @intCast(image.height), 0, c.GL_RED, c.GL_UNSIGNED_BYTE, image.data.ptr),
+        3 => c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGB, @intCast(image.width), @intCast(image.height), 0, c.GL_RGB, c.GL_UNSIGNED_BYTE, image.data.ptr),
+        4 => c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA, @intCast(image.width), @intCast(image.height), 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, image.data.ptr),
+        else => {
+            std.log.err("Unsupported number of channels: {d}\n", .{image.channels});
+            return error.InvalidInput;
+        },
     }
 
     c.glGenerateMipmap(c.GL_TEXTURE_2D);
@@ -74,13 +227,21 @@ fn imageToTexture(image: Image) !c.GLuint {
 }
 
 pub fn main() !void {
-    const image: Image = try Image.init("Broadway_tower_edit.jpg");
-    defer image.deinit();
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
-    _ = alloc;
+
+    const image: Image = try Image.imageFromFile(alloc, "Broadway_tower_edit.jpg");
+    defer image.deinit(alloc);
+
+    const grayscaleImage: Image = try image.applyGrayscale(alloc);
+    defer grayscaleImage.deinit(alloc);
+
+    const sobelImage = try grayscaleImage.applySobelOperator(alloc);
+    defer sobelImage.deinit(alloc);
+
+    const seamCarveImage = try image.applySeamCarve(alloc, &sobelImage);
+    defer seamCarveImage.deinit(alloc);
 
     if (c.glfwInit() == c.GLFW_FALSE) {
         std.log.err("Failed to initialize GLFW!\n", .{});
@@ -118,7 +279,7 @@ pub fn main() !void {
     // c.glClearColor(0.2, 0.3, 0.3, 1.0);
     c.glClearColor(0.0, 0.0, 0.0, 1.0);
 
-    const texture = try imageToTexture(image);
+    const texture = try imageToTexture(seamCarveImage);
     defer c.glDeleteTextures(1, &texture);
 
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
