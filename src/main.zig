@@ -34,10 +34,9 @@ const Image = struct {
             return error.InvalidInput;
         }
 
-        const size: usize = @intCast(width * height * channels);
-
-        const imageData = try alloc.alloc(u8, size);
-        @memcpy(imageData, imageDataPtr[0..size]);
+        const imageSize: usize = @intCast(width * height * channels);
+        const imageData = try alloc.alloc(u8, imageSize);
+        @memcpy(imageData, imageDataPtr[0..imageSize]);
 
         c.stbi_image_free(imageDataPtr);
 
@@ -45,22 +44,24 @@ const Image = struct {
             .width = @intCast(width),
             .height = @intCast(height),
             .channels = @intCast(channels),
-            .size = size,
-            .data = imageData[0..size],
+            .size = imageSize,
+            .data = imageData[0..imageSize],
         };
     }
 
     fn applyGrayscale(self: *const Image, alloc: anytype) !Image {
         assert(self.channels == 3);
 
-        const grayscaleImageData = try alloc.alloc(u8, self.size / self.channels);
+        const grayscaleImageSize = self.size / self.channels;
+        const grayscaleImageData = try alloc.alloc(u8, grayscaleImageSize);
 
         for (0..self.height) |y| {
             for (0..self.width) |x| {
-                const offset = (x + self.width * y) * self.channels;
-                const r: f32 = @floatFromInt(self.data[offset + 0]);
-                const g: f32 = @floatFromInt(self.data[offset + 1]);
-                const b: f32 = @floatFromInt(self.data[offset + 2]);
+                const pixelOffset = (x + self.width * y) * self.channels;
+                const r: f32 = @floatFromInt(self.data[pixelOffset + 0]);
+                const g: f32 = @floatFromInt(self.data[pixelOffset + 1]);
+                const b: f32 = @floatFromInt(self.data[pixelOffset + 2]);
+                // https://stackoverflow.com/a/596243
                 const grayscale = 0.299 * r + 0.587 * g + 0.114 * b;
                 grayscaleImageData[x + self.width * y] = @intFromFloat(grayscale);
             }
@@ -70,7 +71,7 @@ const Image = struct {
             .width = self.width,
             .height = self.height,
             .channels = 1,
-            .size = self.size / self.channels,
+            .size = grayscaleImageSize,
             .data = grayscaleImageData,
         };
     }
@@ -80,11 +81,10 @@ const Image = struct {
 
         const sobelImageData = try alloc.alloc(u8, self.size);
 
-        var gx: i32 = 0;
-        var gy: i32 = 0;
-        const positions = [_]@Vector(2, i32){ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 0, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
-        const x_kernel = [_]i32{ 1, 0, -1, 2, 0, -2, 1, 0, -1 };
-        const y_kernel = [_]i32{ 1, 2, 1, 0, 0, 0, -1, -2, -1 };
+        // defined the Sobel operator kernels
+        const neighborOffsets = [_]@Vector(2, i32){ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 0, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
+        const kernelX = [_]i32{ 1, 0, -1, 2, 0, -2, 1, 0, -1 };
+        const kernelY = [_]i32{ 1, 2, 1, 0, 0, 0, -1, -2, -1 };
 
         for (0..self.height) |y| {
             for (0..self.width) |x| {
@@ -93,15 +93,15 @@ const Image = struct {
                     sobelImageData[offset] = 0;
                     continue;
                 }
-                gx = 0;
-                gy = 0;
-                const x_i32: i32 = @intCast(x);
-                const y_i32: i32 = @intCast(y);
-                inline for (positions, x_kernel, y_kernel) |pos, x_k, y_k| {
-                    const cx: usize = @intCast(x_i32 + pos[0]);
-                    const cy: usize = @intCast(y_i32 + pos[1]);
-                    gx += self.data[cx + self.width * cy] * x_k;
-                    gy += self.data[cx + self.width * cy] * y_k;
+                var gx: i32 = 0;
+                var gy: i32 = 0;
+                const xi: i32 = @intCast(x);
+                const yi: i32 = @intCast(y);
+                inline for (neighborOffsets, kernelX, kernelY) |neigh, kX, kY| {
+                    const neighX: usize = @intCast(xi + neigh[0]);
+                    const neighY: usize = @intCast(yi + neigh[1]);
+                    gx += self.data[neighX + self.width * neighY] * kX;
+                    gy += self.data[neighX + self.width * neighY] * kY;
                 }
                 const g_: f32 = @floatFromInt(gx * gx + gy * gy);
                 const g: u32 = @intFromFloat(@sqrt(g_));
@@ -123,30 +123,54 @@ const Image = struct {
         };
     }
 
-    fn applySeamCarve(self: *const Image, alloc: anytype, imageEnergy: *const Image) !Image {
+    fn applySeamCarve(self: *const Image, alloc: anytype, imageEnergy: Image) !Image {
         assert(self.channels == 3);
         assert(imageEnergy.channels == 1);
 
         const carvedImageData = try alloc.alloc(u8, self.size);
         @memcpy(carvedImageData, self.data);
 
+        const seamImageDataUnnormalized = try alloc.alloc(u32, imageEnergy.size);
+        defer alloc.free(seamImageDataUnnormalized);
+
         const seamImageData = try alloc.alloc(u8, imageEnergy.size);
         defer alloc.free(seamImageData);
 
+        // dynamic programming to find "path of least resistance"
+        // https://en.wikipedia.org/wiki/Seam_carving
+        var maxEnergy: u32 = 0;
         for (0..imageEnergy.height) |y| {
             for (0..imageEnergy.width) |x| {
                 const offset = x + imageEnergy.width * y;
                 if (y == 0) {
-                    seamImageData[offset] = imageEnergy.data[offset];
+                    seamImageDataUnnormalized[offset] = imageEnergy.data[offset];
                     continue;
                 }
-                var minEnergy = imageEnergy.data[x + imageEnergy.width * (y - 1)];
-                if (x != 0) minEnergy = @min(minEnergy, imageEnergy.data[(x - 1) + imageEnergy.width * (y - 1)]);
-                if (x != imageEnergy.width - 1) minEnergy = @min(minEnergy, imageEnergy.data[(x + 1) + imageEnergy.width * (y - 1)]);
-                seamImageData[offset] = imageEnergy.data[offset] +| minEnergy;
+                var minEnergy = seamImageDataUnnormalized[x + imageEnergy.width * (y - 1)];
+                if (x != 0) {
+                    minEnergy = @min(minEnergy, seamImageDataUnnormalized[
+                        (x - 1) + imageEnergy.width * (y - 1)
+                    ]);
+                }
+                if (x != imageEnergy.width - 1) {
+                    minEnergy = @min(minEnergy, seamImageDataUnnormalized[
+                        (x + 1) + imageEnergy.width * (y - 1)
+                    ]);
+                }
+                const energy = imageEnergy.data[offset] + minEnergy;
+                maxEnergy = @max(maxEnergy, energy);
+                seamImageDataUnnormalized[offset] = energy;
             }
         }
 
+        // normalize values
+        for (0..imageEnergy.size) |i| {
+            const energy: f32 = @floatFromInt(seamImageDataUnnormalized[i]);
+            const maxEnergy_: f32 = @floatFromInt(maxEnergy);
+            seamImageData[i] = @intFromFloat(energy / maxEnergy_ * 255.0);
+        }
+
+        // find the start of the seam
         var minX: usize = 0;
         var minEnergy = seamImageData[minX + imageEnergy.width * (imageEnergy.height - 1)];
         for (1..imageEnergy.width) |x| {
@@ -162,6 +186,7 @@ const Image = struct {
         carvedImageData[lastRowOffset + 1] = 0x00;
         carvedImageData[lastRowOffset + 2] = 0x00;
 
+        // carve out the seam tracing the "path of least resistance"
         var y: usize = imageEnergy.height - 2;
         while (y > 0) : (y -= 1) {
             const prevMinX = minX;
@@ -240,7 +265,7 @@ pub fn main() !void {
     const sobelImage = try grayscaleImage.applySobelOperator(alloc);
     defer sobelImage.deinit(alloc);
 
-    const seamCarveImage = try image.applySeamCarve(alloc, &sobelImage);
+    const seamCarveImage = try image.applySeamCarve(alloc, sobelImage);
     defer seamCarveImage.deinit(alloc);
 
     if (c.glfwInit() == c.GLFW_FALSE) {

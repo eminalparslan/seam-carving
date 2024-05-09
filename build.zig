@@ -28,6 +28,9 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("glad/include"));
     exe.addCSourceFile(.{ .file = b.path("glad/src/gl.c") });
 
+    // HACK: glfw isn't found on my system, so I'm hardcoding the path
+    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/glfw/3.4/include" });
+    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/glfw/3.4/lib" });
     exe.linkSystemLibrary("glfw");
     exe.linkFramework("OpenGL");
 
