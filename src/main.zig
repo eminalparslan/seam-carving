@@ -211,16 +211,7 @@ const Image = struct {
     }
 };
 
-fn imageToTexture(image: Image) !c.GLuint {
-    var texture: c.GLuint = undefined;
-    c.glGenTextures(1, &texture);
-    c.glBindTexture(c.GL_TEXTURE_2D, texture);
-
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_REPEAT);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_REPEAT);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-
+fn textureImage(image: Image) !void {
     switch (image.channels) {
         1 => c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_LUMINANCE, @intCast(image.stride), @intCast(image.height), 0, c.GL_RED, c.GL_UNSIGNED_BYTE, image.data.ptr),
         3 => c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGB, @intCast(image.stride), @intCast(image.height), 0, c.GL_RGB, c.GL_UNSIGNED_BYTE, image.data.ptr),
@@ -230,6 +221,19 @@ fn imageToTexture(image: Image) !c.GLuint {
             return error.InvalidInput;
         },
     }
+}
+
+fn createImageTexture(image: Image) !c.GLuint {
+    var texture: c.GLuint = undefined;
+    c.glGenTextures(1, &texture);
+    c.glBindTexture(c.GL_TEXTURE_2D, texture);
+
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_REPEAT);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_REPEAT);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+
+    try textureImage(image);
 
     return texture;
 }
@@ -244,13 +248,9 @@ pub fn main() !void {
 
     var grayscaleImage: Image = try Image.init(alloc, image.width, image.height, 1, image.stride);
     defer grayscaleImage.deinit(alloc);
-    grayscaleImage.applyGrayscale(&image);
 
     var sobelImage = try Image.init(alloc, image.width, image.height, 1, image.stride);
     defer sobelImage.deinit(alloc);
-    sobelImage.applySobelOperator(&grayscaleImage);
-
-    image.applySeamCarve(sobelImage);
 
     if (c.glfwInit() == c.GLFW_FALSE) {
         std.log.err("Failed to initialize GLFW!\n", .{});
@@ -288,7 +288,9 @@ pub fn main() !void {
     // c.glClearColor(0.2, 0.3, 0.3, 1.0);
     c.glClearColor(0.0, 0.0, 0.0, 1.0);
 
-    var i: u32 = 0;
+    const texture = try createImageTexture(image);
+    defer c.glDeleteTextures(1, &texture);
+
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
         // framebuffer size
         var fb_width: c_int = undefined;
@@ -302,11 +304,14 @@ pub fn main() !void {
 
         c.glEnable(c.GL_TEXTURE_2D);
 
-        const texture = try imageToTexture(image);
-        defer c.glDeleteTextures(1, &texture);
+        while (fb_width < image.width) {
+            grayscaleImage.applyGrayscale(&image);
+            sobelImage.applySobelOperator(&grayscaleImage);
+            image.applySeamCarve(sobelImage);
+        }
 
-        // c.glActiveTexture(c.GL_TEXTURE0);
-        // c.glBindTexture(c.GL_TEXTURE_2D, texture);
+        c.glBindTexture(c.GL_TEXTURE_2D, texture);
+        try textureImage(image);
 
         c.glMatrixMode(c.GL_PROJECTION);
         c.glLoadIdentity();
@@ -315,23 +320,19 @@ pub fn main() !void {
         c.glMatrixMode(c.GL_MODELVIEW);
         c.glLoadIdentity();
 
+        const imageWidth: c.GLfloat = @floatFromInt(image.width);
+        const imageStride: c.GLfloat = @floatFromInt(image.stride);
+        const textureWidth: c.GLfloat = imageWidth / imageStride;
         c.glBegin(c.GL_QUADS);
         c.glTexCoord2f(0.0, 0.0);
         c.glVertex2f(0.0, 0.0);
-        c.glTexCoord2f(1.0, 0.0);
+        c.glTexCoord2f(textureWidth, 0.0);
         c.glVertex2f(fb_width_f, 0.0);
-        c.glTexCoord2f(1.0, 1.0);
+        c.glTexCoord2f(textureWidth, 1.0);
         c.glVertex2f(fb_width_f, fb_height_f);
         c.glTexCoord2f(0.0, 1.0);
         c.glVertex2f(0.0, fb_height_f);
         c.glEnd();
-
-        if (i < 900) {
-            grayscaleImage.applyGrayscale(&image);
-            sobelImage.applySobelOperator(&grayscaleImage);
-            image.applySeamCarve(sobelImage);
-        }
-        i += 1;
 
         c.glfwSwapBuffers(window);
         c.glfwPollEvents();
